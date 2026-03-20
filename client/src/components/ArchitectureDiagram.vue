@@ -1,0 +1,376 @@
+<template>
+  <div class="arch-page">
+    <div class="arch-container">
+      <h1 class="arch-title">Strype Analytics — Architecture</h1>
+      <p class="arch-subtitle">High-level system architecture and data flow for the instrumented frame-based editor</p>
+
+      <!-- MAIN ARCHITECTURE DIAGRAM -->
+      <div class="diagram-section">
+        <h2>System Architecture</h2>
+        <div class="diagram-box">
+          <pre class="diagram">
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           BROWSER (Client)                                  │
+│                                                                             │
+│  ┌──────────────┐    ┌──────────────────┐    ┌──────────────────────────┐   │
+│  │              │    │                  │    │                          │   │
+│  │  Vue Router  │───▶│   EditorView     │    │    DashboardView         │   │
+│  │  / = Editor  │    │                  │    │                          │   │
+│  │  /dashboard  │    │  ┌────────────┐  │    │  ┌────────┐ ┌────────┐  │   │
+│  │              │    │  │ FrameBlock │  │    │  │ Metric │ │ Chart  │  │   │
+│  └──────────────┘    │  │ FrameBlock │  │    │  │ Cards  │ │ Bars   │  │   │
+│                      │  │ FrameBlock │  │    │  └────────┘ └────────┘  │   │
+│                      │  └────────────┘  │    │  ┌────────────────────┐ │   │
+│                      │  ┌────────────┐  │    │  │  Event Timeline    │ │   │
+│                      │  │  Console   │  │    │  └────────────────────┘ │   │
+│                      │  │ (Pyodide)  │  │    │  ┌────────────────────┐ │   │
+│                      │  └────────────┘  │    │  │  Research Notes    │ │   │
+│                      └────────┬─────────┘    └──────────┬───────────┘  │   │
+│                               │                         │              │   │
+│                    ┌──────────▼──────────────────────────▼──────────┐   │   │
+│                    │        useInstrumentation()                    │   │   │
+│                    │                                                │   │   │
+│                    │  • Creates typed AnalyticsEvent objects        │   │   │
+│                    │  • Buffers events in memory (5s flush)         │   │   │
+│                    │  • sendBeacon on page unload                   │   │   │
+│                    │  • Manages sessionId, userId, projectId        │   │   │
+│                    └──────────────────────┬─────────────────────────┘   │   │
+│                                           │                            │   │
+│                    ┌──────────────────────┐│                            │   │
+│                    │  usePythonRunner()   ││                            │   │
+│                    │                     ││                            │   │
+│                    │  Pyodide (WASM)     ││                            │   │
+│                    │  Real Python 3.11   ││                            │   │
+│                    │  Loaded from CDN    ││                            │   │
+│                    └──────────────────────┘│                            │   │
+└───────────────────────────────────────────┼────────────────────────────┘   │
+                                            │                                │
+                    POST /api/events ───────┤──── GET /api/dashboard/summary │
+                    (batched JSON)          │    (aggregated metrics)         │
+                                            │                                │
+┌───────────────────────────────────────────┼────────────────────────────────┘
+│                        EXPRESS SERVER (Backend)                              │
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │  REST API Layer                                                       │  │
+│  │                                                                       │  │
+│  │  POST /api/events ─────── Validate + Batch Insert (transaction)       │  │
+│  │  GET  /api/events ─────── Recent events (paginated)                   │  │
+│  │  GET  /api/dashboard/summary ── Aggregated analytics                  │  │
+│  │  GET  /api/health ─────── Health check                                │  │
+│  └───────────────────────────────────────────────┬───────────────────────┘  │
+│                                                   │                         │
+│  ┌───────────────────────────────────────────────▼───────────────────────┐  │
+│  │  SQLite Database (WAL mode)                                           │  │
+│  │                                                                       │  │
+│  │  events table:                                                        │  │
+│  │  ┌────┬────────────┬───────────┬────────────┬─────────┬──────────┐   │  │
+│  │  │ id │ event_name │ timestamp │ session_id │ user_id │ frame_id │   │  │
+│  │  ├────┼────────────┼───────────┼────────────┼─────────┼──────────┤   │  │
+│  │  │ 1  │ frame_added│ ISO-8601  │ uuid-xxxx  │ anon-xx │ frame-1  │   │  │
+│  │  │ 2  │ frame_edit │ ISO-8601  │ uuid-xxxx  │ anon-xx │ frame-1  │   │  │
+│  │  │ ...│ ...        │ ...       │ ...        │ ...     │ ...      │   │  │
+│  │  └────┴────────────┴───────────┴────────────┴─────────┴──────────┘   │  │
+│  │                                                                       │  │
+│  │  Indexes: session_id, event_name, timestamp                           │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────┘
+          </pre>
+        </div>
+      </div>
+
+      <!-- DATA FLOW -->
+      <div class="diagram-section">
+        <h2>Event Data Flow</h2>
+        <div class="diagram-box">
+          <pre class="diagram">
+  User Interaction                    Instrumentation                     Storage
+  ═══════════════                    ═══════════════                     ═══════
+
+  ┌─────────────┐     track()      ┌─────────────┐     flush()       ┌──────────┐
+  │ User clicks │ ──────────────▶  │   Event      │ ──────────────▶  │  SQLite  │
+  │ "Add print" │                  │   Buffer     │   POST /events   │  events  │
+  └─────────────┘                  │              │   (every 5s)     │  table   │
+                                   │  [event 1]   │                  └────┬─────┘
+  ┌─────────────┐     track()      │  [event 2]   │                       │
+  │ User edits  │ ──────────────▶  │  [event 3]   │                       │
+  │ frame field │   (debounced     │  [...]        │                       │
+  └─────────────┘    300ms)        └──────┬────────┘                       │
+                                          │                                │
+  ┌─────────────┐     track()             │  beforeunload                  │
+  │ User clicks │ ──────────────▶         │                                │
+  │ "Run ▶"     │                  ┌──────▼────────┐                       │
+  └─────────────┘                  │  sendBeacon() │──── Last events ──────┤
+                                   │  (reliable    │    (sync delivery)    │
+                                   │   delivery)   │                       │
+                                   └───────────────┘                       │
+                                                                           │
+  ┌──────────────────────────────────────────────────────────────┐         │
+  │                    Dashboard View                             │         │
+  │                                                               │         │
+  │  GET /api/dashboard/summary  ◀────────────────────────────────┼─────────┘
+  │                                                               │
+  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────────┐ │
+  │  │ Sessions │ │  Events  │ │  Frames  │ │ Avg Duration     │ │
+  │  │    12    │ │   347    │ │   89     │ │ 4m 23s           │ │
+  │  └──────────┘ └──────────┘ └──────────┘ └──────────────────┘ │
+  │                                                               │
+  │  Frame Usage:  ████████████████ funccall (34)                 │
+  │                ██████████ if (21)                              │
+  │                ████████ for (18)                               │
+  │                ██████ varassign (12)                           │
+  │                ██ comment (4)                                  │
+  │                                                               │
+  │  Event Timeline:  2s ago │ frame_edited │ funccall            │
+  │                   8s ago │ frame_added  │ if                  │
+  │                  15s ago │ program_run  │                     │
+  └──────────────────────────────────────────────────────────────┘
+          </pre>
+        </div>
+      </div>
+
+      <!-- PYTHON EXECUTION FLOW -->
+      <div class="diagram-section">
+        <h2>Python Execution Flow</h2>
+        <div class="diagram-box">
+          <pre class="diagram">
+  Frame Editor                    Transpiler                    Pyodide (WASM)
+  ════════════                    ══════════                    ══════════════
+
+  ┌──────────────┐               ┌──────────────┐              ┌──────────────┐
+  │ ┌──────────┐ │               │              │              │              │
+  │ │ varassign│ │               │  x = 5       │              │  Python 3.11 │
+  │ │ x = 5    │ │               │              │              │  running in  │
+  │ ├──────────┤ │   generate    │  y = 10      │   execute    │  WebAssembly │
+  │ │ varassign│ │──────────────▶│              │─────────────▶│              │
+  │ │ y = 10   │ │  Python code  │  if x &lt; y:   │  runPython   │  stdout ──┐  │
+  │ ├──────────┤ │               │      pass    │  Async()     │  stderr ──┤  │
+  │ │ if       │ │               │              │              │           │  │
+  │ │ x &lt; y    │ │               │  print(x+y)  │              └───────────┤──┘
+  │ ├──────────┤ │               │              │                          │
+  │ │ print    │ │               └──────────────┘                          │
+  │ │ x + y    │ │                                                         │
+  │ └──────────┘ │                                               ┌─────────▼──┐
+  └──────────────┘                                               │  Console   │
+                                                                 │            │
+                                                                 │  15        │
+                                                                 │            │
+                                                                 │  Finished  │
+                                                                 └────────────┘
+          </pre>
+        </div>
+      </div>
+
+      <!-- EVENT SCHEMA -->
+      <div class="diagram-section">
+        <h2>Typed Event Schema</h2>
+        <div class="diagram-box">
+          <pre class="diagram">
+  AnalyticsEvent (TypeScript interface — shared between client and server)
+  ════════════════════════════════════════════════════════════════════════
+
+  {
+    eventName:   EventName        ──▶  "frame_added" | "frame_edited" | "frame_deleted"
+                                       "frame_moved" | "program_run_clicked"
+                                       "program_saved" | "session_started"
+                                       "session_ended" | "error_shown"
+                                       "dashboard_viewed"
+
+    timestamp:   string (ISO)     ──▶  "2026-03-20T13:45:02.123Z"
+
+    sessionId:   string (UUID)    ──▶  "a1b2c3d4-e5f6-..." (per browser session)
+
+    userId:      string           ──▶  "anon-8f2a3b1c" (anonymous by default)
+
+    projectId:   string           ──▶  "project-x9y8z7" (per coding project)
+
+    frameId?:    string           ──▶  "frame-1710892502-1" (if event relates to a frame)
+
+    frameType?:  FrameType        ──▶  "funccall" | "if" | "for" | "varassign" | "comment"
+
+    metadata?:   Record           ──▶  { direction: "up" } or { frameCount: 5 }
+  }
+
+  Frame Types (matching Strype terminology):
+  ═══════════════════════════════════════════
+
+  ┌────────────┬──────────────┬────────────────────────────────────────┐
+  │ Type       │ Python equiv │ Fields                                 │
+  ├────────────┼──────────────┼────────────────────────────────────────┤
+  │ funccall   │ print(...)   │ expression                             │
+  │ if         │ if ...:      │ condition                              │
+  │ for        │ for .. in ..:│ variable, iterable                     │
+  │ varassign  │ x = ...      │ name, value                            │
+  │ comment    │ # ...        │ text                                   │
+  └────────────┴──────────────┴────────────────────────────────────────┘
+          </pre>
+        </div>
+      </div>
+
+      <!-- DASHBOARD ANALYTICS QUERIES -->
+      <div class="diagram-section">
+        <h2>Dashboard Analytics Pipeline</h2>
+        <div class="diagram-box">
+          <pre class="diagram">
+  Raw Events ──▶ SQL Aggregation ──▶ DashboardSummary ──▶ UI Components
+  ═══════════    ═══════════════     ════════════════     ═════════════
+
+  Total Sessions:
+    SELECT COUNT(DISTINCT session_id) FROM events
+
+  Avg Session Duration:
+    SELECT AVG(duration) FROM (
+      SELECT (julianday(MAX(timestamp)) - julianday(MIN(timestamp)))
+             * 86400000 as duration        ◀── milliseconds
+      FROM events GROUP BY session_id
+    )
+
+  Frame Type Usage:
+    SELECT frame_type, COUNT(*) as count
+    FROM events WHERE event_name = 'frame_added'
+    GROUP BY frame_type ORDER BY count DESC
+
+  Edits Before Run:
+    WITH session_events AS (
+      SELECT *, ROW_NUMBER() OVER            ◀── Window function to
+        (PARTITION BY session_id              │   order events within
+         ORDER BY timestamp) as rn           │   each session
+      FROM events                            │
+    )                                        │
+    SELECT AVG(edit_count)                   │
+    WHERE event_name = 'frame_edited'        │
+    AND rn &lt; run_position                    ◀── Count edits before run
+
+  Run Attempts Per Session:
+    SELECT CAST(COUNT(*) AS FLOAT) / COUNT(DISTINCT session_id)
+    FROM events WHERE event_name = 'program_run_clicked'
+          </pre>
+        </div>
+      </div>
+
+      <!-- TECH STACK -->
+      <div class="diagram-section">
+        <h2>Technology Stack</h2>
+        <div class="diagram-box">
+          <pre class="diagram">
+  ┌─────────────────────────────────────────────────────────────────┐
+  │  FRONTEND (Netlify)                                             │
+  │                                                                 │
+  │  Vue 3.4 ──── Composition API with &lt;script setup lang="ts"&gt;    │
+  │  TypeScript ── Strict mode, shared types with backend           │
+  │  Vite 5 ───── Dev server with API proxy to :3001                │
+  │  Vue Router ── / (Editor) and /dashboard (Analytics)            │
+  │  Pyodide ──── Python 3.11 via WebAssembly (CDN loaded)          │
+  │  CSS ──────── Custom properties design system (no Tailwind)     │
+  │               JetBrains Mono (code) + Inter (UI)                │
+  ├─────────────────────────────────────────────────────────────────┤
+  │  BACKEND (Railway / Render)                                     │
+  │                                                                 │
+  │  Express 4 ── REST API with CORS + JSON middleware              │
+  │  TypeScript ── Same types as frontend (DRY)                     │
+  │  SQLite ───── better-sqlite3, WAL mode, indexed                 │
+  │  tsx ──────── Dev runner with hot reload                        │
+  └─────────────────────────────────────────────────────────────────┘
+
+  Why this stack?
+  ═══════════════
+  • Vue 3 + TypeScript + Vite ─── Matches Strype's actual stack
+  • Pyodide ────────────────────── Same Python execution approach as Strype
+  • SQLite ─────────────────────── Zero-config, embeddable, fast for analytics
+  • Express + TS ───────────────── Single language across the entire project
+  • CSS custom properties ──────── Clean, no build dependencies
+          </pre>
+        </div>
+      </div>
+
+      <div class="back-link">
+        <router-link to="/" class="btn">← Back to Editor</router-link>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+</script>
+
+<style scoped>
+.arch-page {
+  background-color: #f8fafc;
+  min-height: 100vh;
+  padding: 40px 24px;
+}
+
+.arch-container {
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.arch-title {
+  font-size: 1.8rem;
+  font-weight: 700;
+  color: #1e293b;
+  margin-bottom: 8px;
+}
+
+.arch-subtitle {
+  color: #64748b;
+  margin-bottom: 40px;
+  font-size: 1rem;
+}
+
+.diagram-section {
+  margin-bottom: 40px;
+}
+
+.diagram-section h2 {
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: #1e293b;
+  margin-bottom: 12px;
+  padding-left: 12px;
+  border-left: 3px solid #6366f1;
+}
+
+.diagram-box {
+  background-color: #1e1e2e;
+  border-radius: 12px;
+  padding: 24px;
+  overflow-x: auto;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+}
+
+.diagram {
+  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  color: #cdd6f4;
+  margin: 0;
+  white-space: pre;
+  -webkit-font-smoothing: antialiased;
+}
+
+.back-link {
+  margin-top: 32px;
+  text-align: center;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 20px;
+  background-color: #6366f1;
+  color: white;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-decoration: none;
+  transition: all 0.2s ease;
+}
+
+.btn:hover {
+  background-color: #4f46e5;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+}
+</style>
