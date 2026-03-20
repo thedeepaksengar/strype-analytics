@@ -189,4 +189,4 @@ strype-analytics/
 
 ## Author
 
-Built by Mahleon as a technical demonstration for the Strype Web Programmer position at King's College London, supervised by Michael Kolling and Neil Brown.
+Built by Deepak Singh Sengar as a technical demonstration for the Strype Web Programmer position at King's College London, supervised by Michael Kolling and Neil Brown.
